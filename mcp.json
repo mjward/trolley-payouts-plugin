@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "trolley": {
+      "type": "stdio",
+      "command": "sh",
+      "args": [
+        "run.sh"
+      ],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "TROLLEY_ACCESS_KEY": "${TROLLEY_ACCESS_KEY}",
+        "TROLLEY_SECRET_KEY": "${TROLLEY_SECRET_KEY}"
+      }
+    }
+  }
+}

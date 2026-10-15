@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "trolley",
+  "version": "0.7.0",
+  "description": "Full Trolley payouts API: recipients, accounts, batches, payments, offline payments, invoices, balances, verifications, webhooks, partner settings. Read tools by default; money-moving and irreversible writes require confirm.",
+  "author": { "name": "Trolley payouts plugin contributors" },
+  "keywords": ["trolley", "payouts", "payments"],
+  "extensions": {
+    "com.cursor": {
+      "variables": {
+        "TROLLEY_ACCESS_KEY": { "description": "Trolley API Access Key (Dashboard > Settings > API Keys). Sandbox and live keys differ.", "secret": true, "required": true },
+        "TROLLEY_SECRET_KEY": { "description": "Trolley API Secret Key, used only to HMAC-sign requests locally.", "secret": true, "required": true }
+      }
+    }
+  }
+}

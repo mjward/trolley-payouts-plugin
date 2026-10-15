@@ -1,0 +1,12 @@
+*.db
+*.db-*
+*.db*
+*.tar.gz
+*.tgz
+.env
+.env*
+node_modules/
+logs/
+*.log
+launchd/
+.DS_Store
