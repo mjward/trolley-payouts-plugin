@@ -94,6 +94,12 @@ The three cache switches can also live in the config file `~/.config/trolley-plu
 
 ## How the cache works
 
+### Why there's a cache
+
+It's about speed. Trolley returns payments a page at a time, 100 per page by default (`TROLLEY_PAGE_SIZE`), and the plugin sends at most 100 requests a minute by default (`TROLLEY_RATE_LIMIT`). As an example, a month of about 10,000 payments takes 100 requests to read live, and a year takes about 1,200. That's at least 1 minute for one month and 12 minutes for a year from the rate limit alone, and often much longer, because a page can take 10 to 30 seconds when Trolley is busy. The same question answered from the local SQLite copy takes milliseconds.
+
+The copy also makes questions across many batches practical, such as trends, failure rates over time or one recipient's payment history, through `payout_query`. Phone mode makes the opposite trade: nothing is stored on the device, and every answer is fetched live, so it's slower.
+
 The plugin can keep a local copy of your Trolley data in SQLite, a small database stored as a single file at `~/.cache/trolley-plugin/`. The laptop setting turns the copy on; the phone setting turns it off, so every answer comes straight from Trolley.
 
 ```mermaid
