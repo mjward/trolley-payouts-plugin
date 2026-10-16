@@ -2,6 +2,26 @@
 
 Notes on how the plugin works under the hood. The [README](../README.md) covers setup and use.
 
+## One payment sync run
+
+```mermaid
+sequenceDiagram
+  participant J as Payment sync (launchd)
+  participant DB as SQLite
+  participant T as Trolley API
+  J->>DB: Read the payment watermark
+  loop Page by page, newest changes first
+    J->>T: GET /payments?orderBy=updatedAt&sortBy=desc
+    T-->>J: Payments
+  end
+  Note over J: Stop at the first payment older than the watermark minus 2 minutes
+  J->>DB: Save the changed payments (no names)
+  J->>DB: Move the watermark to the newest updatedAt seen
+  Note over J,DB: If any step fails, the watermark stays put and the next run retries
+```
+
+Each hourly run reads only what changed since the watermark. The watermark only moves after the changes are saved.
+
 ## Tools (23)
 One `<resource>_read` and one `<resource>_write` tool per resource, each with an `action` enum:
 recipients, recipient_accounts, batches, payments, offline_payments, invoices, invoice_payments, balances, verifications, webhooks, reference (read only), partner.

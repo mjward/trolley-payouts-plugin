@@ -92,6 +92,99 @@ The three cache switches can also live in the config file `~/.config/trolley-plu
 | `TROLLEY_REQUEST_TIMEOUT_MS` | `180000` | Give up on one request after this many milliseconds (minimum 5000). | yes |
 | `TROLLEY_QUERY_TIMEOUT_MS` | `5000` | Time limit for a local `payout_query` search, in milliseconds. | |
 
+## How the cache works
+
+The plugin can keep a local copy of your Trolley data in SQLite, a small database stored as a single file at `~/.cache/trolley-plugin/`. The laptop setting turns the copy on; the phone setting turns it off, so every answer comes straight from Trolley.
+
+```mermaid
+flowchart TD
+  T["Tool call"] --> W{"What is it for?"}
+  W -->|"Recipient lookup"| RL["Ask Trolley live (GET)"]
+  RL -->|"Found"| RC{"Recipient cache on?"}
+  RC -->|"Yes"| RS["Save the safe fields to SQLite"]
+  RC -->|"No (phone)"| A1["Answer (never a name)"]
+  RS --> A1
+  RL -->|"Trolley down, looked up by ID"| RF["Use the saved copy, if any"]
+  RF --> A1
+  W -->|"/payday or payout stats"| PC{"Payment cache on?"}
+  PC -->|"Yes"| PL{"Batch in SQLite up to date?"}
+  PL -->|"Unfinished, changed or never saved"| PG["Download its payments (GET)"]
+  PL -->|"Finished in the last 120 days"| PR["Quick check for new returns (GET)"]
+  PL -->|"Older and finished"| PS["Use the saved copy"]
+  PG --> A2["Answer from SQLite"]
+  PR --> A2
+  PS --> A2
+  PC -->|"No (phone)"| LV["Download live into a throwaway in-memory copy"]
+  LV --> A3["Answer"]
+  W -->|"payout_query"| PQ["Search SQLite only (needs the payment cache)"]
+```
+
+Recipient lookups always ask Trolley first and only fall back to the saved copy if Trolley can't be reached. Payday and payout stats answers come from the saved copy, after re-downloading any batch that may have changed.
+
+What is saved: batches, their payments, and the recipients who have payments. Names, tax details, bank details, addresses, phone numbers, dates of birth and government IDs are never saved.
+
+```mermaid
+erDiagram
+  batches ||--o{ payments : contains
+  recipients ||--o{ payments : "is paid by"
+  batches {
+    text id PK
+    text status
+    text description
+    text amount
+    text currency
+    int totalPayments
+    int returnedCount
+    text updatedAt
+  }
+  payments {
+    text id PK
+    text batchId FK
+    text recipientId
+    text status
+    text sourceAmount
+    text fees
+    text payoutMethod
+    text country
+    text returnReason
+    text updatedAt
+  }
+  recipients {
+    text id PK
+    text referenceId
+    text email
+    text country
+    text payoutMethod
+    text status
+    text complianceStatus
+    int isPhoneVerified
+    text updatedAt
+  }
+```
+
+The three tables, with their main columns. Each key gets its own database file, so sandbox and production data never mix.
+
+## How the copy is kept up to date
+
+```mermaid
+flowchart TD
+  D{"Device settings: sync on and the matching cache on?"}
+  D -->|"No (phone)"| X["Nothing runs; lookups stay live"]
+  D -->|"Yes (laptop)"| BF["Backfill, run once by hand: all batches and payments, then only recipients who have payments"]
+  BF --> WM["Recipient watermark set to when the backfill started"]
+  BF --> PS["Payment sync, every hour at :07 (the first run only records the time)"]
+  WM --> RS["Recipient sync at 00:37, 06:37, 12:37, 18:37"]
+  PS --> P1["Read payments newest-changed first (GET) until it passes the watermark, minus 2 minutes"]
+  P1 --> P2["Save them, then move the watermark forward"]
+  P2 --> P3{"6 hours since the last returns check?"}
+  P3 -->|"Yes"| P4["Check every batch from the last 90 days for returned payments (GET)"]
+  RS --> R0{"Payday?"}
+  R0 -->|"Yes"| R1["Skip; the watermark stays put, so nothing is missed"]
+  R0 -->|"No"| R2["Fetch recipients changed since the watermark (GET); update only ones already saved"]
+```
+
+A one-off backfill fills the copy, then two scheduled jobs keep it current by fetching only what changed since the last run (the "watermark"). They do nothing unless sync and the matching cache are switched on.
+
 ## Scheduled jobs
 
 Three jobs run through launchd, the Mac's built-in scheduler. They don't wake a sleeping Mac; a missed run happens once when it wakes.
