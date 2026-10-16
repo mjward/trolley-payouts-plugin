@@ -1,163 +1,126 @@
-# trolley — Trolley payouts Agent Plugin
+# Trolley payouts plugin for Cursor
 
-Zero-dependency stdio MCP server (Node 18+) covering the whole [Trolley API v1](https://developers.trolley.com/api/) — 80/80 operations, see [ENDPOINTS.md](ENDPOINTS.md).
+This is an MCP plugin for Cursor that connects to [Trolley](https://www.trolley.com), the payouts platform. MCP (Model Context Protocol) is the standard Cursor uses to give its AI chat extra tools. With this plugin you can ask about payment batches, payouts and recipients in plain English, get a summary of each monthly payday, and get a Mac notification when a payday batch moves, gets stuck or has too many failed payments. It keeps an optional local copy of your payment data so answers are fast, and it keeps that copy up to date on a schedule. The payday, recipient, sync and monitor features only ever read from Trolley. The plugin also has general tools that can change data in Trolley; those always ask for an explicit confirmation and do a dry run otherwise.
 
-## Tools (23)
-One `<resource>_read` and one `<resource>_write` tool per resource, each with an `action` enum:
-recipients, recipient_accounts, batches, payments, offline_payments, invoices, invoice_payments, balances, verifications, webhooks, reference (read only), partner.
+## Quick start
 
-**Why this layout:** 80 tiny tools would make `tools/list` unreadable. One tool per resource can't carry honest MCP annotations, because it would mix reads and deletes. A read/write split gives 22 tools: every `_read` tool is `readOnlyHint:true`, and every `_write` tool is `destructiveHint:true`.
+You need macOS (for the scheduled jobs and notifications), Node.js 22.5 or newer, and a Trolley API key pair (Trolley dashboard, Settings, API Keys).
 
-Common args: ids (`recipientId`, `batchId`, `paymentId`, `accountId`, `offlinePaymentId`, `subscriptionId`, `countryCode`, `payoutMethod`; prefixes validated), `query` (filters), `body` (JSON body per docs), `page`/`pageSize`, `all`/`maxPages`, `raw`, `confirm`.
+1. Copy this folder to `~/.cursor/plugins/local/trolley-plugin`.
+2. Add your keys to `~/.zshrc`, then open a new terminal:
+   ```sh
+   export TROLLEY_ACCESS_KEY=your-access-key
+   export TROLLEY_SECRET_KEY=your-secret-key
+   export TROLLEY_ENVIRONMENT=production   # or sandbox
+   ```
+3. Run the first-time setup. It asks whether this is a laptop or a phone and writes the config file:
+   ```sh
+   sh ~/.cursor/plugins/local/trolley-plugin/run.sh init --device laptop
+   ```
+   Then fill the local copy (this can take an hour on a big account, and you can stop and restart it):
+   ```sh
+   sh ~/.cursor/plugins/local/trolley-plugin/run.sh backfill
+   ```
+4. Add the plugin to `~/.cursor/mcp.json` and restart Cursor:
+   ```json
+   {
+     "mcpServers": {
+       "trolley": {
+         "command": "sh",
+         "args": ["/Users/YOU/.cursor/plugins/local/trolley-plugin/run.sh"]
+       }
+     }
+   }
+   ```
+   `run.sh` reads your keys and settings from `~/.zshrc` and finds a suitable Node, so you don't need to put keys in `mcp.json`.
 
-## recipient_lookup and the /recipient skill (read-only)
-Paste a recipient ID or an email. Whitespace, `mailto:`, `<…>` and quotes are stripped.
-- `R-…` ids go to `GET /recipients/:id`.
-- Emails are matched exactly (case-insensitively) and must resolve to a single recipient; more than one match returns an ambiguity error. Trolley's `email` filter is case-sensitive, so the tool calls the exact filter, then `search`, then the lowercased filter if both missed. If there's still no match it tries the ID path, then returns a clear not-found.
-- Returns `{matchedBy, recipient: {id, referenceId, name, email, status, complianceStatus, payoutMethod, country, isPhoneVerified, createdAt}}` and never sensitive fields. Each environment's keys only see that environment's recipients.
+## Commands and skills
 
-## payday_summary and the /payday skill (read-only)
-Payday is the 15th by default (`TROLLEY_PAYDAY_DAY`, in `TROLLEY_TIMEZONE`, default Australia/Melbourne). Each cycle's payout runs are created a few days before payday (`TROLLEY_BATCH_CREATE_DAY`, default the 11th). The tool looks for payment batches created from 3 days before that through the end of payday. Set `TROLLEY_BATCH_GROUPS` (e.g. `"Group A,Group B"`) to pick one batch per group: groups match whole words in the batch description, case-insensitive, and a `YYYY-MM <group>` prefix ranks a candidate first. With no groups set, every batch in the window is listed together. The `YYYY-MM` label month doesn't have to match the payday month. Re-run batches created after payday are listed as other batches, not counted.
-- `month`: "Oct", "October", "Oct 2026" or "2026-10". With a bare month name it uses that month's most recent payday on or before today. With no `month` it uses the most recent 15th on or before today (Melbourne).
-- Output, per batch and combined: total amount per currency (exact), successful/failed/returned counts, id, status, createdAt (Melbourne). A batch still `open` gets `flag: "not yet in waiting approval"`. Observed statuses: `open` → `awaiting_approval` → `processing` → `complete`/`failed`.
-- Data: one `GET /batches?startDate=<window start>`, then only those two batches are refreshed if the local copy may be behind: non-terminal, never synced, or completed <120 days with a changed returned count.
+- `/payday [month]` summarises a payday: each payout run's status, payment count, total and failures.
+- `/recipient <id, email or reference>` looks up one recipient.
+- `/init` (or `sh run.sh init --device laptop|phone`) sets up the plugin on a device.
+- `sh run.sh backfill` fills the local copy from scratch. It resumes if interrupted.
+- `sh run.sh sync payments|recipients [--dry-run]` runs one sync by hand.
+- `sh run.sh schedule install|uninstall|status [--agent|--monitor]` manages the scheduled jobs.
+- `sh run.sh monitor run [--dry-run] [--date YYYY-MM-DD]` runs one payday monitor check. `sh run.sh monitor test-notify` sends a test notification.
 
-## Environment check (whoami)
-Sandbox and live share `https://api.trolley.com` and Trolley exposes no documented sandbox flag, so the plugin identifies the environment from configuration, never from the key itself:
-- `TROLLEY_KNOWN_KEYS="<fp>=sandbox,<fp>=production"`: fingerprints are `sha256(accessKey)` hex, first 12 characters. They're safe to share, and `whoami` shows the current one.
-- `TROLLEY_ENVIRONMENT=sandbox|production` (declared).
-- If the two disagree (for example a prod key loaded where sandbox was declared), every Trolley call is refused. If neither is set, `environment` is `unknown`. Every tool result includes `environment`.
-- For tests, run in a clean env (`env -i PATH=… HOME=… TROLLEY_ACCESS_KEY=… TROLLEY_SECRET_KEY=… TROLLEY_ENVIRONMENT=sandbox`) so shell variables can't leak in.
+## Configuration
 
-## Requirements
-Node **>= 22.5** (uses the built-in `node:sqlite`; zero npm dependencies). `server/index.mjs` exits with a clear message on older Node. If the `node` on PATH is too old, set `mcp.json` `"command"` to a newer binary, e.g. `~/.asdf/installs/nodejs/24.x/bin/node`.
+Set these as `export NAME=value` lines in `~/.zshrc`. `run.sh` only reads the names on its allowlist from that file (marked "yes" below) and never runs anything else in it. Settings without a "yes" have to be set in the environment some other way, for example in the `env` block of `mcp.json` or the launchd job.
 
-## Local store (SQLite) — sync_cache, payout_stats, payout_query
-- **File:** `TROLLEY_DB_PATH` (default `~/.cache/trolley-plugin/trolley.db`). There's one file per environment: `trolley-<sha256(accessKey)[:12]>.db`, so sandbox and prod never mix. The key itself is never stored. Files are 0600 in a 0700 directory, using WAL.
-- **Schema (no PII):** no names, emails, recipient ids, addresses, memos or account details.
-  - `batches(id PK, status, tags JSON, amount, currency, totalPayments, createdAt, sentAt, completedAt, updatedAt, returnedCount, lastSyncedAt)`
-  - `payments(id PK, batchId FK, status, sourceAmount, sourceCurrency, targetAmount, targetCurrency, fees, payoutMethod, country, createdAt, processedAt, returnedAt, settledAt, updatedAt, failureReason, returnReason, lastSyncedAt)`
-  - Reason columns hold short error codes only.
-- **Refresh** (shared by `sync_cache` and `payout_stats`; GET only):
-  1. List all batches (pageSize 1000) and upsert them. Batches no longer listed are removed.
-  2. Non-terminal batches (anything except `complete`/`failed`) always get a full payment refetch.
-  3. Terminal batches completed less than `TROLLEY_FINAL_AFTER_DAYS` ago (default 120) get one cheap call: `GET /batches/:id/payments?status=returned&pageSize=1`. If `meta.records` differs from the stored `returnedCount`, or the batch was never synced, or its `updatedAt`/status changed, it's refetched. This check exists because Trolley does **not** bump batch `updatedAt` when a payment is returned later; in prod a third of returns arrived 1–11 weeks after completion.
-  4. Older terminal batches are synced once, then treated as final. `full:true` checks them too, and `force:true` refetches everything.
-  - Each batch is replaced in one transaction, upserting by payment id and dropping deleted payments, so runs are idempotent.
-- **`payout_stats`:** refreshes (unless `skipRefresh`), then computes from SQL with exact decimal sums. Output includes `refresh` (calls, refetched, checked, changed) and `dataAsOf`.
-- **`payout_query`:** read-only SQL over the store. Safeguards:
-  - Only a single `SELECT`/`WITH` statement is accepted. `PRAGMA`, `ATTACH`, writes and transaction keywords are rejected by a text guard.
-  - The DB is opened `readOnly`, and an SQLite authorizer allows only SELECT/READ/FUNCTION/RECURSIVE.
-  - Rows are capped at 1000. Queries time out after `TROLLEY_QUERY_TIMEOUT_MS` (default 5000) in a child process that is SIGKILLed.
-- **Known cost:** every refresh refetches all payments of non-terminal batches. Large processing batches can take many minutes to refresh when Trolley is slow. Use `payout_stats {skipRefresh:true}` for instant answers on already-synced data.
-- **Rate limit and concurrency:** `TROLLEY_RATE_LIMIT_PER_MIN` (default 45, cap 2000) and `TROLLEY_CONCURRENCY` (default 4, cap 20), or per call. The token bucket is shared, concurrency halves on repeated 429s, `Retry-After` is honoured, and failed GETs are retried.
+The three cache switches can also live in the config file `~/.config/trolley-plugin/config.json` (or the path in `TROLLEY_CONFIG_FILE`), which `init` writes. An environment variable always overrides the config file.
 
-## Shapes
-- `Payout = { id, recipientId, batchId, status, sourceAmount, sourceCurrency, targetAmount, targetCurrency, fees, memo, processedAt }` (payments; `raw:true` for the full object).
-- `RecipientSummary = { id, referenceId, name, email, status, complianceStatus, payoutMethod, country, currency?, createdAt }`.
-- `BatchSummary = { id, status, amount, currency, totalPayments, description, tags, createdAt, sentAt, completedAt }` (batch lists).
-- Everything else is returned as-is, minus sensitive fields.
+| Name | Default | What it changes | In ~/.zshrc |
+|---|---|---|---|
+| **Credentials** | | | |
+| `TROLLEY_ACCESS_KEY` | none (required) | Your Trolley API access key. | yes |
+| `TROLLEY_SECRET_KEY` | none (required) | Your Trolley API secret key. | yes |
+| **Environment safety** | | | |
+| `TROLLEY_ENVIRONMENT` | unset | Says whether the keys are `sandbox` or `production`. Shown on every answer. | yes |
+| `TROLLEY_KNOWN_KEYS` | unset | List of `fingerprint=sandbox,fingerprint=production`. A fingerprint is the first 12 characters of the key's SHA-256 hash; `whoami` shows yours. If this and `TROLLEY_ENVIRONMENT` disagree, every call is refused. | yes |
+| **Payday** | | | |
+| `TROLLEY_TIMEZONE` | `Australia/Melbourne` | Time zone for payday dates and times. | yes |
+| `TROLLEY_PAYDAY_DAY` | `15` | Day of the month that is payday (cut to the month's last day if needed). | yes |
+| `TROLLEY_BATCH_CREATE_DAY` | `11` | Day the payout runs are usually created. `/payday` searches from 3 days before this through payday. | yes |
+| `TROLLEY_BATCH_GROUPS` | unset | Comma-separated group names, e.g. `Group A,Group B`. Each batch is matched to a group by whole words in its description, ignoring case. Unset means every batch in the cycle is shown together. | yes |
+| **Caching & sync** | | | |
+| `TROLLEY_RECIPIENT_CACHE` | `true` | Keep a local copy of recipients. Off means every lookup goes live to Trolley. Also `recipientCache` in the config file. | yes |
+| `TROLLEY_PAYMENT_CACHE` | `true` | Keep a local copy of batches and payments. Off means `/payday` and stats go live, and `payout_query` stops working. Also `paymentCache` in the config file. | yes |
+| `TROLLEY_SYNC_ENABLED` | `true` | Allow backfill and scheduled syncs. Also `syncEnabled` in the config file. | yes |
+| `TROLLEY_CONFIG_FILE` | `~/.config/trolley-plugin/config.json` | Where the config file is. | yes |
+| `TROLLEY_DB_PATH` | `~/.cache/trolley-plugin/trolley.db` | Where the local copy is stored. One file is kept per key, so sandbox and production never mix. | |
+| `TROLLEY_FINAL_AFTER_DAYS` | `120` | How long a finished batch is still checked for late returned payments. | |
+| `TROLLEY_SYNC_MAX_PAGES` | `1000` | Safety limit on pages read in one scheduled sync run. | |
+| `TROLLEY_BACKFILL_PASSES` | `3` | How many times the backfill retries recipients that failed. | |
+| `TROLLEY_BULK_COST_FACTOR` | `25` | How much slower one 1,000-row page is than one single lookup. Used to choose how the backfill loads recipients. | |
+| `TROLLEY_RECIPIENT_RETRIES` | `2` | Retries for a single recipient lookup during backfill. | |
+| `TROLLEY_RETRY_WAIT_MS` | `2000` | Wait between those retries, in milliseconds. | |
+| `TROLLEY_LOG_DIR` | `~/Library/Logs/trolley-plugin` | Where the scheduled jobs write their logs. | |
+| **Payday monitor** | | | |
+| `TROLLEY_PAYDAY_MONITOR` | `true` | Turns the payday monitor on or off. | yes |
+| `TROLLEY_FAIL_RATE_WARN` | `3` | Warn when failed plus returned payments go over this percentage... | yes |
+| `TROLLEY_FAIL_MIN_COUNT` | `25` | ...and there are at least this many of them. | yes |
+| `TROLLEY_FAIL_RATE_HIGH` | `10` | Warn again over this percentage. | yes |
+| `TROLLEY_FAIL_SMALL_BATCH_SIZE` | `300` | Batches with fewer payments than this use the small-batch rule instead. | yes |
+| `TROLLEY_FAIL_SMALL_BATCH_COUNT` | `10` | Small-batch rule: warn at this many failures. | yes |
+| `TROLLEY_NOTIFY_EMAIL` | unset | Reserved for email alerts. Not built yet, so it does nothing. | yes |
+| **Performance** | | | |
+| `TROLLEY_RATE_LIMIT` | `100` | Most requests per minute sent to Trolley (maximum 2000). | yes |
+| `TROLLEY_RATE_LIMIT_PER_MIN` | `100` | Older name for the same setting. `TROLLEY_RATE_LIMIT` wins if both are set. | yes |
+| `TROLLEY_CONCURRENCY` | `4` | How many requests run at once (maximum 20). | yes |
+| `TROLLEY_PAGE_SIZE` | `100` | Rows per page when reading payments (10 to 1000). Smaller pages come back faster when Trolley is slow. | yes |
+| `TROLLEY_REQUEST_TIMEOUT_MS` | `180000` | Give up on one request after this many milliseconds (minimum 5000). | yes |
+| `TROLLEY_QUERY_TIMEOUT_MS` | `5000` | Time limit for a local `payout_query` search, in milliseconds. | |
 
-## Sensitive data policy (no bypass)
-Sensitive recipient data is **never** returned: SSN/government IDs, DOB, passport/birthplace/citizenship, address/street/postal code, bank account/IBAN/routing/SWIFT numbers, tax fields, phone, and webhook hmac secrets. These are stripped recursively by key name and pattern in every tool, including with `raw:true`. Any call that passes `includeSensitive` is rejected with a policy error. Recipient summaries keep only `country`. Allowlist (booleans only): `isPhoneVerified`. Use the Trolley dashboard for sensitive details.
+## Scheduled jobs
 
-## Safety
-- `confirm:true` is required for: all deletes, `batches.start_processing` (MONEY), verification trigger/expire, and every partner write. `payments.create/update` also need it when the batch is not `open`. Without it you get a dry run (`{dryRun, wouldCall, body, reason}`) and nothing is sent.
-- Rate limits: a 429 is retried up to 3× and honours `Retry-After` (seconds or HTTP-date, capped at 60s). Each attempt is re-signed.
+Three jobs run through launchd, the Mac's built-in scheduler. They don't wake a sleeping Mac; a missed run happens once when it wakes.
 
-## Setup
-Set `TROLLEY_ACCESS_KEY` / `TROLLEY_SECRET_KEY` (Dashboard > Settings > API Keys). Sandbox vs live is decided by which key pair you use. Never commit keys.
+- Payment sync runs every hour at 7 minutes past. It fetches payments that changed since the last run, and every 6 hours it also checks for late returned payments.
+- Recipient sync runs at 00:37, 06:37, 12:37 and 18:37. It skips payday.
+- The payday monitor checks every 15 minutes, but only for 48 hours from midnight on payday (moved to Monday if payday is on a weekend). It sends a Mac notification when a batch changes stage. It warns if a group's batch is missing at 09:00, still waiting for approval at 12:00 or still processing at 17:00, once each on both days. It also warns when failures pass the thresholds above. It only runs while you're logged in.
 
-## Auth
-`Authorization: prsign <ACCESS_KEY>:<hex HMAC-SHA256(secret, ts\nMETHOD\npath+query\nbody\n)>` plus `X-PR-Timestamp` (must be within 30s of UTC). The exact path+query and body string that are sent are the ones signed.
+Install the two syncs with `sudo sh run.sh schedule install` (this lets them run even when you're logged out), or with `sh run.sh schedule install --agent` to run them only while you're logged in. Install the monitor with `sh run.sh schedule install --monitor`. Check them with `sh run.sh schedule status`.
 
-## Known API quirks (sandbox)
-- Updating a recipient account may return a new account id. Use the id from the update response for later calls.
-- Deleting a recipient archives it, and archived recipients are hidden from the default list (`query:{status:"archived"}` shows them). Their accounts can't be deleted after archiving.
-- `invoice_payments search` requires `invoiceIds` or `paymentIds` in `body`.
+Logs are in `~/Library/Logs/trolley-plugin/`: `payment-sync.log`, `recipient-sync.log` and `payday-monitor.log`. Each is rotated at 1 MB, and 5 old copies are kept.
 
-## Test
-    node --test test/*.test.mjs   (Node >= 22.5)
+To pause a sync, run `sudo launchctl disable system/com.trolley-plugin.payment-sync` (or `recipient-sync`), and `enable` to resume. To pause the monitor, set `TROLLEY_PAYDAY_MONITOR=false`. To remove them, run `sudo sh run.sh schedule uninstall` for the syncs and `sh run.sh schedule uninstall --monitor` for the monitor.
 
-## Status badges
-`statusBadge`/`complianceBadge` (recipient_lookup, payday_summary) is an emoji dot plus inline code, e.g. 🟡 `incomplete`. 🟢 active/processed/completed, 🟡 incomplete/pending/open/awaiting approval, 🔴 blocked/failed/returned/suspended, ⚪ anything else. Raw `status` is unchanged.
+## Privacy and safety
 
-## Configuration (env or ~/.zshrc)
-`run.sh` (the MCP command) loads these `export` lines from `~/.zshrc` when they aren't already set in the environment. It reads only the allowlist `TROLLEY_(ACCESS_KEY|SECRET_KEY|ENVIRONMENT|KNOWN_KEYS|RATE_LIMIT|RATE_LIMIT_PER_MIN|CONCURRENCY|CACHE_DIR|REQUEST_TIMEOUT_MS|PAGE_SIZE|RECIPIENT_CACHE|PAYMENT_CACHE|SYNC_ENABLED|CONFIG_FILE|TIMEZONE|PAYDAY_DAY|BATCH_CREATE_DAY|BATCH_GROUPS|PAYDAY_MONITOR|NOTIFY_EMAIL|FAIL_RATE_WARN|FAIL_RATE_HIGH|FAIL_MIN_COUNT|FAIL_SMALL_BATCH_COUNT|FAIL_SMALL_BATCH_SIZE)`. It also finds a Node >= 22.5 (PATH, then asdf, Homebrew or nvm).
+- The payday, recipient, sync and monitor features only send GET requests, which read and never change anything.
+- Tools that can change data in Trolley need `confirm: true`. Without it they only show what they would have done.
+- Sensitive fields (tax, bank, address, phone, date of birth, government IDs) are never stored or shown. There is no option to include them.
+- Recipient names are never stored or shown.
+- Keys are never printed or stored. Only a short fingerprint is shown.
+- The local copy and config file can only be read by your user account.
+
+More detail on how it works is in [docs/INTERNALS.md](docs/INTERNALS.md), and every Trolley endpoint covered is listed in [ENDPOINTS.md](ENDPOINTS.md).
+
+## Development
+
+There are no npm dependencies. Run the tests with Node 22.5 or newer:
+
 ```sh
-export TROLLEY_TIMEZONE=Australia/Sydney   # IANA name; default Australia/Melbourne
-export TROLLEY_PAYDAY_DAY=15               # 1-31, clamped to the month length; default 15
-export TROLLEY_BATCH_GROUPS="Group A,Group B"  # optional; whole-word, case-insensitive match on batch description; unset = list all batches in the cycle
-export TROLLEY_BATCH_CREATE_DAY=11         # 1-31, clamped; default 11
+npm test
 ```
-All payday dates use TROLLEY_TIMEZONE, and the result's `statusLine` shows it. The batch search runs from (BATCH_CREATE_DAY − 3) to the end of PAYDAY_DAY. If the create day is after the payday day, the window starts in the previous month. An invalid value falls back to its default, with a warning on stderr and in `configWarnings`.
-
-### Amounts in payday_summary
-`totalAmount` is the sum of the payments' `sourceAmount` (matching the counts). `batchAmount` is Trolley's `batch.amount`, shown alongside with `batchAmountMinusPaymentSum`, `paymentFees` and `paymentTargetSum` for reconciliation. They can differ. Classification uses `TROLLEY_BATCH_GROUPS` (whole words, case-insensitive). The `YYYY-MM` prefix is not the payday month.
-
-`TROLLEY_REQUEST_TIMEOUT_MS` (default 180000) aborts a stuck request; GETs are retried.
-
-## Rate limit
-`TROLLEY_RATE_LIMIT` (requests/min, default 100, max 2000) is the main setting. `TROLLEY_RATE_LIMIT_PER_MIN` is an alias; if both are set, `TROLLEY_RATE_LIMIT` wins. A single token bucket covers every Trolley API call: tools, `sync_cache`/cache builds, `payout_stats`, `payday_summary` and `recipient_lookup`. A per-call `rateLimitPerMin` overrides it for sync and stats runs.
-
-## recipient_lookup routing
-`R-…` uses `GET /recipients/:id`. Input containing `@` is treated as an email (exact, case-insensitive match). Anything else, including UUIDs, is treated as a reference ID: `GET /recipients?referenceId=` (an exact filter; `search=` is a LIKE prefix match), and the returned `referenceId` must equal the input exactly. If that fails, it falls back to the ID path. `matchedBy` is `id`, `email` or `referenceId`.
-
-`TROLLEY_PAGE_SIZE` (10-1000, default 100) sets the page size for payment listings. Trolley's response time grows with page size: for a large processing batch, 1000-row pages can take minutes while 100-row pages take seconds. Smaller pages fetched in parallel finish sooner. payday_summary uses concurrency of at least 10.
-
-## Recipient cache, sync scopes and /init
-- Tables: `recipients(id, referenceId, email, country, payoutMethod, status, complianceStatus, isPhoneVerified 0/1, createdAt, updatedAt, lastSyncedAt)`, `sync_state(key, value)`, plus `payments.recipientId` (an opaque ID, added by an additive migration).
-- **Privacy:** storing email is owner-approved. **Names are sensitive**: `name`/`firstName`/`lastName` are stripped from every tool output and never stored. An old `name` column is dropped and the DB VACUUMed on open. Tax, bank, address, phone, DOB and government IDs are never stored. The DB is mode 0600. There is no includeSensitive option.
-- `/recipient` shows the ID, email, referenceId and statuses, never a name. Bulk tools (`payout_stats`, `payout_query`, `payday_summary`) output only IDs and counts. `payout_query` can't read `recipients`; use the `recipient_facts` view (no email).
-- Lazy fill: any payment `recipientId` missing from `recipients` is fetched with `GET /recipients/:id` (a 404 becomes a `not_found` stub). `sync_cache` fills up to 500 per run.
-- Watermark sweep (`sync_cache` scope `recipients` or `all`): `GET /recipients?startDate=<watermark − 2 min>&endDate=<sweep start>&orderBy=updatedAt&sortBy=asc`, pageSize 1000. Only recipients already in the table are upserted (duplicates dedupe to the newest). The watermark moves to the max `updatedAt` seen, or to the sweep start if nothing was returned. That happens in one transaction, only after the whole sweep succeeds. The first run with no watermark just sets it to now.
-- `/init` / `sh run.sh backfill`: batches and payments, then every referenced recipient, then the watermark is set to the backfill start. It's idempotent and resumable, prints progress, and is read-only. See skills/init for time estimates.
-- `recipient_lookup` routing: UUID → `?referenceId=` (exact). Input containing `@` → `?email=` (exact, case-insensitive). `R-…` → `/recipients/:id`. Anything else → `?search=`: one hit returns it; several return up to 10 candidates plus `count`. Live is tried first; if the live call fails (not a 404), the cached row is returned (`source: "cache"`).
-
-## Cache and sync switches
-Three independent booleans (`true` or `false`; any other value is ignored with a warning). Precedence: env var, then the config file, then the default `true`. All are allowlisted in `run.sh`.
-
-| Env var | Config key | When `false` |
-|---|---|---|
-| `TROLLEY_RECIPIENT_CACHE` | `recipientCache` | `recipient_lookup` is live-only, nothing is read from or written to `recipients`, no lazy fill, no sweep |
-| `TROLLEY_PAYMENT_CACHE` | `paymentCache` | `payout_stats` and `payday_summary` fetch live into a throwaway in-memory DB, so nothing touches disk. `payout_query` returns a "payment cache disabled" error. No lazy fill, since that needs cached payments |
-| `TROLLEY_SYNC_ENABLED` | `syncEnabled` | `sync_cache`, `run.sh backfill` and any scheduled sync are no-ops that report `sync disabled`. A tool's own targeted refresh (for example payday's two batches) still runs when its cache is on |
-
-Config file: `TROLLEY_CONFIG_FILE` or `~/.config/trolley-plugin/config.json`, mode 0600, written by `/init` (`sh run.sh init --device laptop|phone`). On a laptop all three are `true`; on a phone all three are `false` and nothing is backfilled. `run.sh backfill` refuses on a phone config unless `--force` is given.
-```json
-{ "device": "laptop", "recipientCache": true, "paymentCache": true, "syncEnabled": true }
-```
-
-## Superseded: daily sync (see Scheduled syncs)
-- About 06:00 Australia/Melbourne each day, run `sync_cache` with `scope: "all"` (only if `syncEnabled`).
-- Skip the run on days a payday batch is detected: a payment batch in a configured group (any batch, if no groups are set) in the current cycle window that isn't terminal (`open`, `awaiting_approval` or `processing`), so sync doesn't compete with payday traffic.
-- A skipped day doesn't advance the recipient watermark. The next run sweeps from the old watermark (minus the 2-min overlap), so nothing is missed.
-
-### Recipients phase strategy
-Backfill only loads recipients whose IDs appear on cached payments (`SELECT DISTINCT recipientId …`). It picks the cheaper of two strategies:
-- per-ID: one `GET /recipients/:id` per missing ID
-- bulk: `GET /recipients?pageSize=1000` across all pages, keeping only the referenced IDs. Stored fields are identical and a name is never stored. Completed pages are recorded in `sync_state`, so it resumes.
-
-Bulk is chosen when pages × `TROLLEY_BULK_COST_FACTOR` (default 25, an estimate of how much slower one 1000-row page is than one ID call) < missing IDs. Any referenced ID the bulk listing doesn't return is then fetched by ID.
-
-## Scheduled syncs (launchd, macOS)
-
-- `payment-sync` runs hourly at :07. It walks `GET /v1/payments?orderBy=updatedAt&sortBy=desc` until it passes the payment watermark (`payments.updatedAtWatermark`) minus 2 minutes. It upserts by id (idempotent), and the watermark moves only after a successful run. Every 6 h the same job also checks `status=returned` on each batch created in the last 90 days.
-- `recipient-sync` runs at 00:37, 06:37, 12:37 and 18:37 local time. It uses the recipient `updatedAt` watermark (2-minute overlap) and updates cached recipients only. It skips payday days, and the watermark isn't advanced on a skipped day.
-- Both jobs honour `syncEnabled`, `paymentCache` and `recipientCache`, and read keys through run.sh. Neither makes AI calls. They share a lock with the backfill (`sync.lock` next to the DB) and skip the run if a backfill process is found.
-- Commands:
-  - `sh run.sh sync payments|recipients [--dry-run]` runs one sync by hand.
-  - `sh run.sh schedule install|uninstall|status [--agent]`: the default is a LaunchDaemon (needs sudo once); `--agent` installs a LaunchAgent instead (only while you're logged in, no sudo).
-- Logs: `~/Library/Logs/trolley-plugin/{payment,recipient}-sync.log`, rotated at 1 MB with 5 kept.
-
-## Payday monitor (LaunchAgent, macOS)
-
-- Runs every 15 minutes (:00/:15/:30/:45), but only during a 48-hour window from 00:00 (`TROLLEY_TIMEZONE`, default Australia/Melbourne) on payday: `TROLLEY_PAYDAY_DAY` (default 15), clamped to the month and moved to Monday when it falls on a weekend (no public holidays), plus the following day. Outside the window it exits straight away with no API calls.
-- Each run takes one live `GET /batches` (most recent 100, any status). It tracks this cycle's batch for each `TROLLEY_BATCH_GROUPS` group (or every batch in the window if none are set), plus any other batch created in the cycle window.
-- Notifies on: a new batch; a move to waiting for approval, approved (processing), complete or failed.
-- Stuck alerts (once per batch per day, on both days; day-2 alerts say "day 2"): a configured group's batch missing at 09:00; still waiting for approval at 12:00; still processing at 17:00. Transition and failure-rate alerts fire once across the whole window.
-- Failure rate (processing/complete batches): 2 calls per batch (`status=failed` and `status=returned`, `pageSize=1`, read `meta.records`). Warns once when the rate is above `TROLLEY_FAIL_RATE_WARN` (3%) and there are at least `TROLLEY_FAIL_MIN_COUNT` (25). Batches under `TROLLEY_FAIL_SMALL_BATCH_SIZE` (300) payments warn at `TROLLEY_FAIL_SMALL_BATCH_COUNT` (10) or more. Escalates once above `TROLLEY_FAIL_RATE_HIGH` (10%).
-- Delivery: macOS notification (osascript) plus `~/Library/Logs/trolley-plugin/payday-monitor.log`. `TROLLEY_NOTIFY_EMAIL` is a placeholder for future email delivery and does nothing yet.
-- State: `~/.cache/trolley-plugin/payday-monitor-state.json` (0600). Lock: `payday-monitor.lock`. The on/off switch is `TROLLEY_PAYDAY_MONITOR` (default true).
-- `sh run.sh monitor run [--dry-run] [--date YYYY-MM-DD] [--now ISO]` (`--date` uses the current Melbourne time of day on that date), `sh run.sh monitor test-notify`, `sh run.sh schedule install|uninstall|status --monitor`.
-- Pause: `TROLLEY_PAYDAY_MONITOR=false` in `~/.zshrc`, or `launchctl bootout gui/$(id -u)/com.trolley-plugin.payday-monitor`. Remove: `sh run.sh schedule uninstall --monitor`.
