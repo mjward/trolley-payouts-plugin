@@ -31,7 +31,7 @@ recipients, recipient_accounts, batches, payments, offline_payments, invoices, i
 Common args: ids (`recipientId`, `batchId`, `paymentId`, `accountId`, `offlinePaymentId`, `subscriptionId`, `countryCode`, `payoutMethod`; prefixes validated), `query` (filters), `body` (JSON body per docs), `page`/`pageSize`, `all`/`maxPages`, `raw`, `confirm`.
 
 ## Local store (SQLite) — sync_cache, payout_stats, payout_query
-- **File:** `TROLLEY_DB_PATH` (default `~/.cache/trolley-plugin/trolley.db`). There's one file per environment: `trolley-<sha256(accessKey)[:12]>.db`, so sandbox and prod never mix. The key itself is never stored. Files are 0600 in a 0700 directory, using WAL.
+- **File:** `TROLLEY_DB_PATH` (default `~/.cache/trolley-plugin/trolley.db`). There's one file per environment: `trolley-<sha256(accessKey)[:12]>.db`, so sandbox and prod never mix. The key itself is never stored. Files are 0600 in a 0700 directory, using WAL while open. The last connection to close switches the file to rollback mode (removing -wal/-shm), so read-only opens such as `sqlite3 -readonly` work afterwards; the next read-write open goes back to WAL.
 - **Schema (no PII):** no names, emails, recipient ids, addresses, memos or account details.
   - `batches(id PK, status, tags JSON, amount, currency, totalPayments, createdAt, sentAt, completedAt, updatedAt, returnedCount, lastSyncedAt)`
   - `payments(id PK, batchId FK, status, sourceAmount, sourceCurrency, targetAmount, targetCurrency, fees, payoutMethod, country, createdAt, processedAt, returnedAt, settledAt, updatedAt, failureReason, returnReason, lastSyncedAt)`

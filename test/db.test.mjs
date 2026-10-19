@@ -93,3 +93,27 @@ test("SQL guard rejects writes, PRAGMA, ATTACH, multi-statement", async () => {
   await assert.rejects(runQuery("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c", { path, timeoutMs: 300 }), /exceeded/);
   await assert.rejects(runQuery("SELECT * FROM pragma_table_info('payments')", { path }), /not allowed/); // passes text guard, blocked by authorizer
 });
+
+test("clean close leaves a DB that opens read-only with no -wal/-shm (sqlite3 -readonly)", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { existsSync, chmodSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const path = tmp();
+  const a = openDb({ path }), b = openDb({ path }); // two writers at once, like sync + server
+  replaceBatchPayments(a, B(), [P("P-1", "processed")]);
+  a.close(); // not the last connection: must not block or break b, stays WAL
+  assert.equal(b.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+  replaceBatchPayments(b, B({ id: "B-2" }), [P("P-2", "processed")]);
+  b.close(); // last one out: rollback mode, sidecars gone
+  assert.ok(!existsSync(`${path}-wal`) && !existsSync(`${path}-shm`));
+  chmodSync(dirname(path), 0o500); // read-only can't create sidecars here
+  try {
+    const ro = new DatabaseSync(path, { readOnly: true });
+    try { assert.equal(ro.prepare("SELECT count(*) n FROM payments").get().n, 2); } finally { ro.close(); }
+    let cli = null; try { cli = execFileSync("sqlite3", ["-readonly", path, "select count(*) from payments"], { encoding: "utf8" }); } catch (e) { if (e.code !== "ENOENT") throw e; }
+    if (cli !== null) assert.equal(cli.trim(), "2");
+  } finally { chmodSync(dirname(path), 0o700); }
+  const c = openDb({ path }); // reopening goes back to WAL
+  try { assert.equal(c.prepare("PRAGMA journal_mode").get().journal_mode, "wal"); assert.equal(c.prepare("SELECT count(*) n FROM payments").get().n, 2); } finally { c.close(); }
+});

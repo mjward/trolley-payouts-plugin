@@ -54,7 +54,10 @@ export function openDb({ path, readOnly = false, memory = false } = {}) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
   const db = new DatabaseSync(path, { timeout: 5000 });
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;");
+  // WAL while open (sync, recipient sync, monitor and server can overlap). If a reader still holds the file in
+  // rollback mode the switch can be busy: stay in rollback mode then (busy_timeout covers locking) rather than fail.
+  try { db.exec("PRAGMA journal_mode=WAL"); } catch {}
+  db.exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;");
   db.exec(SCHEMA);
   // Additive migrations (never rebuild).
   if (db.prepare("PRAGMA table_info(recipients)").all().some(c => c.name === "name")) { // name became sensitive: drop it and its old values
@@ -65,7 +68,17 @@ export function openDb({ path, readOnly = false, memory = false } = {}) {
   if (!db.prepare("PRAGMA table_info(batches)").all().some(c => c.name === "description")) db.exec("ALTER TABLE batches ADD COLUMN description TEXT"); // pre-0.5.1 stores
   db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES('schemaVersion',?)").run(String(SCHEMA_VERSION));
   db.secure = () => secure(path); db.secure(); db.path = path;
+  const close = db.close.bind(db);
+  db.close = () => { leaveWal(db); close(); };
   return db;
+}
+
+// On close, the last connection switches the file to rollback mode (DELETE), which checkpoints and removes -wal/-shm
+// and leaves a self-contained DB, so read-only opens (sqlite3 -readonly, readOnly:true) need no sidecars. node:sqlite
+// can't set SQLITE_FCNTL_PERSIST_WAL. Leaving WAL needs exclusive access: if another connection is open it's busy,
+// so don't wait and stay in WAL (the last one out converts). The next read-write openDb sets WAL again.
+function leaveWal(db) {
+  try { db.exec("PRAGMA busy_timeout=0"); db.prepare("PRAGMA journal_mode=DELETE").get(); } catch {}
 }
 
 const CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
